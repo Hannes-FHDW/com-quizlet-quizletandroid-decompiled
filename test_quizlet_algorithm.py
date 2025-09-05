@@ -11,7 +11,8 @@ This script demonstrates the key features:
 
 from quizlet_learning_algorithm import (
     TextSanitizer, VocabularyItem, QuizletLearningSession, 
-    QuestionType, MasteryLevel, LearningAlgorithm
+    QuestionType, MasteryLevel, LearningAlgorithm, LearningConfiguration,
+    QuestionDirection
 )
 import random
 
@@ -179,7 +180,13 @@ def demonstrate_full_learning_cycle():
         
         print(f"User answer: '{user_answer}'")
         
-        result = session.submit_answer(vocab.id, user_answer, question['question_type'])
+        result = session.submit_answer(
+            vocab.id, 
+            user_answer, 
+            question['question_type'],
+            question['question_direction'],
+            question['correct_answer']
+        )
         
         print(f"Result: {'✅ Correct' if result['is_correct'] else '❌ Incorrect'}")
         print(f"Mastery: {result['mastery_level']} (streak: {result['correct_streak']})")
@@ -202,6 +209,132 @@ def demonstrate_full_learning_cycle():
           f"({progress['mastered_percentage']:.1f}%)")
 
 
+def test_new_configuration_features():
+    """Test the new configuration features"""
+    print("\n🔧 Testing New Configuration Features")
+    print("=" * 50)
+    
+    # Test different question directions
+    vocabulary = [
+        VocabularyItem(1, "hello", "hallo"),
+        VocabularyItem(2, "goodbye", "auf wiedersehen"),
+        VocabularyItem(3, "thank you", "danke")
+    ]
+    
+    # Test mixed direction
+    print("\n📋 Testing Mixed Question Direction")
+    config_mixed = LearningConfiguration(
+        question_direction=QuestionDirection.MIXED,
+        enabled_question_types={QuestionType.MULTIPLE_CHOICE}
+    )
+    session_mixed = QuizletLearningSession(vocabulary.copy(), config=config_mixed)
+    
+    for _ in range(5):
+        round_items = session_mixed.start_new_round()
+        for vocab in round_items[:1]:  # Test just first item
+            question = session_mixed.generate_question(vocab)
+            print(f"Prompt: '{question['prompt']}' -> Expected: '{question['correct_answer']}' "
+                  f"(Direction: {question['question_direction'].value})")
+    
+    # Test question type filtering
+    print("\n🎯 Testing Question Type Filtering")
+    configs = [
+        ("Multiple Choice Only", {QuestionType.MULTIPLE_CHOICE}),
+        ("Written Only", {QuestionType.WRITTEN}),
+        ("Fill-in-Blank + True/False", {QuestionType.FILL_IN_BLANK, QuestionType.TRUE_FALSE})
+    ]
+    
+    for config_name, enabled_types in configs:
+        print(f"\n{config_name}:")
+        config = LearningConfiguration(enabled_question_types=enabled_types)
+        session = QuizletLearningSession(vocabulary.copy(), config=config)
+        
+        round_items = session.start_new_round()
+        for vocab in round_items:
+            question = session.generate_question(vocab)
+            print(f"  {vocab.term} -> {question['question_type'].name}")
+
+
+def test_partial_credit_system():
+    """Test the partial credit system"""
+    print("\n🎯 Testing Partial Credit System")
+    print("=" * 40)
+    
+    vocabulary = [VocabularyItem(1, "hello", "hallo")]
+    
+    # Test with partial credit enabled
+    config_partial = LearningConfiguration(
+        partial_credit_enabled=True,
+        partial_credit_threshold=0.7,
+        enabled_question_types={QuestionType.WRITTEN}
+    )
+    session = QuizletLearningSession(vocabulary, config=config_partial)
+    
+    test_answers = [
+        ("hallo", "Perfect match"),
+        ("halo", "Minor spelling error"), 
+        ("hello", "Wrong but similar"),
+        ("completely wrong", "Completely wrong")
+    ]
+    
+    print("Testing different answer quality:")
+    for user_answer, description in test_answers:
+        vocab = vocabulary[0]
+        vocab.correct_streak = 0  # Reset for each test
+        
+        question = session.generate_question(vocab)
+        result = session.submit_answer(
+            vocab.id, 
+            user_answer, 
+            question['question_type'],
+            question['question_direction'],
+            question['correct_answer']
+        )
+        
+        print(f"  '{user_answer}' ({description}):")
+        print(f"    Similarity: {result['partial_score']:.2f}")
+        print(f"    Correct: {result['is_correct']}")
+        print(f"    Streak: {result['correct_streak']}")
+
+
+def test_language_specific_written_questions():
+    """Test language-specific written question settings"""
+    print("\n🌍 Testing Language-Specific Written Questions")
+    print("=" * 50)
+    
+    vocabulary = [VocabularyItem(1, "hello", "hallo")]
+    
+    configs = [
+        ("Term language written disabled", LearningConfiguration(
+            term_language_written_enabled=False,
+            definition_language_written_enabled=True
+        )),
+        ("Definition language written disabled", LearningConfiguration(
+            term_language_written_enabled=True,
+            definition_language_written_enabled=False
+        )),
+        ("Both languages written enabled", LearningConfiguration(
+            term_language_written_enabled=True,
+            definition_language_written_enabled=True
+        ))
+    ]
+    
+    for config_name, config in configs:
+        print(f"\n{config_name}:")
+        session = QuizletLearningSession(vocabulary.copy(), config=config)
+        
+        # Test both directions
+        for direction in [QuestionDirection.TERM_TO_DEFINITION, QuestionDirection.DEFINITION_TO_TERM]:
+            vocab = vocabulary[0]
+            vocab.probability_correct = 0.9  # High confidence to prefer written
+            
+            question_type = session.learning_algorithm.select_question_type(vocab, direction)
+            written_allowed = config.should_use_written_for_direction(direction)
+            
+            print(f"  {direction.value}: Written allowed: {written_allowed}, "
+                  f"Selected: {question_type.name}")
+
+
 def main():
     """Run all test demonstrations"""
     print("🧪 Quizlet Learning Algorithm - Test Suite")
@@ -214,6 +347,11 @@ def main():
     test_round_generation()
     demonstrate_full_learning_cycle()
     
+    # New feature tests
+    test_new_configuration_features()
+    test_partial_credit_system()
+    test_language_specific_written_questions()
+    
     print("\n✅ All tests completed!")
     print("\nKey Features Demonstrated:")
     print("- Text sanitization and spell checking tolerance")
@@ -221,6 +359,9 @@ def main():
     print("- Mastery level progression through correct/incorrect answers")  
     print("- Intelligent round generation prioritizing struggling items")
     print("- Complete learning cycle with progress tracking")
+    print("- Configurable question types and directions")
+    print("- Partial credit system with similarity scoring")
+    print("- Language-specific written question controls")
 
 
 if __name__ == "__main__":

@@ -33,11 +33,58 @@ class QuestionType(Enum):
     REVEAL_SELF_ASSESSMENT = 16
 
 
+class QuestionDirection(Enum):
+    """Direction of questions - which part to ask for"""
+    TERM_TO_DEFINITION = "term_to_definition"  # Show term, ask for definition
+    DEFINITION_TO_TERM = "definition_to_term"  # Show definition, ask for term
+    MIXED = "mixed"  # Randomly choose direction
+
+
 class MasteryLevel(Enum):
     """Learning progress levels for vocabulary items"""
     NOT_STARTED = "not_started"
     IN_PROGRESS = "in_progress" 
     MASTERED = "mastered"
+
+
+@dataclass
+class LearningConfiguration:
+    """Configuration options for the learning session"""
+    # Question type settings
+    enabled_question_types: Set[QuestionType] = field(default_factory=lambda: {
+        QuestionType.WRITTEN, 
+        QuestionType.MULTIPLE_CHOICE, 
+        QuestionType.TRUE_FALSE, 
+        QuestionType.FILL_IN_BLANK
+    })
+    
+    # Direction settings
+    question_direction: QuestionDirection = QuestionDirection.TERM_TO_DEFINITION
+    
+    # Language-specific written question settings
+    term_language_written_enabled: bool = True  # Enable written questions for term language
+    definition_language_written_enabled: bool = True  # Enable written questions for definition language
+    
+    # Partial credit settings
+    partial_credit_enabled: bool = True
+    partial_credit_threshold: float = 0.7  # Minimum similarity for partial credit
+    
+    # Spelling tolerance
+    spelling_tolerance: int = 2  # Maximum edit distance for spelling errors
+    
+    def is_question_type_enabled(self, question_type: QuestionType) -> bool:
+        """Check if a question type is enabled"""
+        return question_type in self.enabled_question_types
+    
+    def should_use_written_for_direction(self, direction: QuestionDirection) -> bool:
+        """Check if written questions should be used for a specific direction"""
+        if direction == QuestionDirection.TERM_TO_DEFINITION:
+            return self.definition_language_written_enabled
+        elif direction == QuestionDirection.DEFINITION_TO_TERM:
+            return self.term_language_written_enabled
+        else:
+            # For mixed, use written if either direction allows it
+            return self.term_language_written_enabled or self.definition_language_written_enabled
 
 
 @dataclass
@@ -60,6 +107,8 @@ class Answer:
     user_input: str
     is_correct: bool
     question_type: QuestionType
+    question_direction: QuestionDirection
+    partial_score: float = 0.0  # Score between 0.0 and 1.0 for partial credit
     timestamp: datetime = field(default_factory=datetime.now)
 
 
@@ -174,6 +223,29 @@ class TextSanitizer:
         distance = cls.levenshtein_distance(user_clean, correct_clean)
         
         return distance <= max_errors
+    
+    @classmethod
+    def calculate_similarity_score(cls, user_answer: str, correct_answer: str) -> float:
+        """
+        Calculate similarity score between 0.0 and 1.0 for partial credit
+        Returns 1.0 for exact match, decreasing based on edit distance
+        """
+        user_clean = cls.sanitize_answer(user_answer)
+        correct_clean = cls.sanitize_answer(correct_answer)
+        
+        if user_clean == correct_clean:
+            return 1.0
+        
+        if not user_clean or not correct_clean:
+            return 0.0
+        
+        max_length = max(len(user_clean), len(correct_clean))
+        distance = cls.levenshtein_distance(user_clean, correct_clean)
+        
+        # Calculate similarity as 1 - (distance / max_possible_distance)
+        similarity = max(0.0, 1.0 - (distance / max_length))
+        
+        return similarity
 
 
 class LearningAlgorithm:
@@ -200,14 +272,16 @@ class LearningAlgorithm:
         QuestionType.REVEAL_SELF_ASSESSMENT: 0.0
     }
     
-    def __init__(self, mastery_threshold: int = 2):
+    def __init__(self, mastery_threshold: int = 2, config: Optional[LearningConfiguration] = None):
         """
         Initialize learning algorithm
         
         Args:
             mastery_threshold: Number of consecutive correct answers needed for mastery
+            config: Learning configuration options
         """
         self.mastery_threshold = mastery_threshold
+        self.config = config or LearningConfiguration()
     
     def calculate_probability_correct(self, vocab: VocabularyItem, question_type: QuestionType) -> float:
         """
@@ -237,28 +311,61 @@ class LearningAlgorithm:
         else:
             vocab.probability_correct = max(0.1, vocab.probability_correct * 0.8)
     
-    def select_question_type(self, vocab: VocabularyItem) -> QuestionType:
+    def select_question_type(self, vocab: VocabularyItem, direction: QuestionDirection = QuestionDirection.TERM_TO_DEFINITION) -> QuestionType:
         """
-        Select question type based on learner confidence
+        Select question type based on learner confidence and configuration
         Higher confidence -> harder question types
         """
         prob_correct = vocab.probability_correct
         
+        # Get enabled question types
+        enabled_types = list(self.config.enabled_question_types)
+        if not enabled_types:
+            # Fallback if no types enabled
+            enabled_types = [QuestionType.MULTIPLE_CHOICE]
+        
+        # Filter written questions based on direction and configuration
+        available_types = []
+        for qtype in enabled_types:
+            if qtype == QuestionType.WRITTEN:
+                if self.config.should_use_written_for_direction(direction):
+                    available_types.append(qtype)
+            else:
+                available_types.append(qtype)
+        
+        if not available_types:
+            # Fallback if no types available after filtering
+            available_types = [QuestionType.MULTIPLE_CHOICE]
+        
+        # Select based on confidence level, prioritizing enabled types
         if prob_correct < 0.3:
-            # Low confidence: use multiple choice
-            return QuestionType.MULTIPLE_CHOICE
+            # Low confidence: prefer easier types
+            preferred = [QuestionType.MULTIPLE_CHOICE, QuestionType.TRUE_FALSE]
+            suitable = [t for t in preferred if t in available_types]
+            if suitable:
+                return random.choice(suitable)
         elif prob_correct < 0.6:
             # Medium confidence: mix of multiple choice and fill-in-blank
-            return random.choice([QuestionType.MULTIPLE_CHOICE, QuestionType.FILL_IN_BLANK])
+            preferred = [QuestionType.MULTIPLE_CHOICE, QuestionType.FILL_IN_BLANK, QuestionType.TRUE_FALSE]
+            suitable = [t for t in preferred if t in available_types]
+            if suitable:
+                return random.choice(suitable)
         elif prob_correct < 0.8:
-            # Higher confidence: written answers
-            return QuestionType.WRITTEN
+            # Higher confidence: written and fill-in-blank
+            preferred = [QuestionType.WRITTEN, QuestionType.FILL_IN_BLANK]
+            suitable = [t for t in preferred if t in available_types]
+            if suitable:
+                return random.choice(suitable)
         else:
-            # High confidence: written answers
-            return QuestionType.WRITTEN
+            # High confidence: written answers preferred
+            if QuestionType.WRITTEN in available_types:
+                return QuestionType.WRITTEN
+        
+        # Fallback to any available type
+        return random.choice(available_types)
     
-    def update_mastery_level(self, vocab: VocabularyItem, is_correct: bool):
-        """Update mastery level based on answer correctness"""
+    def update_mastery_level(self, vocab: VocabularyItem, is_correct: bool, partial_score: float = 1.0):
+        """Update mastery level based on answer correctness and partial score"""
         if is_correct:
             vocab.correct_streak += 1
             if vocab.mastery_level == MasteryLevel.NOT_STARTED:
@@ -266,7 +373,15 @@ class LearningAlgorithm:
             elif vocab.correct_streak >= self.mastery_threshold:
                 vocab.mastery_level = MasteryLevel.MASTERED
         else:
-            vocab.correct_streak = 0
+            # For partial credit, reduce streak based on score
+            if self.config.partial_credit_enabled and partial_score > 0:
+                # Partial credit: reduce streak but don't reset to 0
+                reduction = int((1.0 - partial_score) * vocab.correct_streak)
+                vocab.correct_streak = max(0, vocab.correct_streak - reduction)
+            else:
+                # No partial credit: reset streak
+                vocab.correct_streak = 0
+            
             if vocab.mastery_level == MasteryLevel.MASTERED:
                 vocab.mastery_level = MasteryLevel.IN_PROGRESS
     
@@ -299,17 +414,19 @@ class QuizletLearningSession:
     Based on assistantMode.stepGenerators.a from Quizlet app
     """
     
-    def __init__(self, vocabulary_list: List[VocabularyItem], round_size: int = 7):
+    def __init__(self, vocabulary_list: List[VocabularyItem], round_size: int = 7, config: Optional[LearningConfiguration] = None):
         """
         Initialize learning session
         
         Args:
             vocabulary_list: List of vocabulary items to learn
             round_size: Number of items per round (based on Quizlet's default)
+            config: Learning configuration options
         """
         self.vocabulary = {item.id: item for item in vocabulary_list}
         self.round_size = round_size
-        self.learning_algorithm = LearningAlgorithm()
+        self.config = config or LearningConfiguration()
+        self.learning_algorithm = LearningAlgorithm(config=self.config)
         self.text_sanitizer = TextSanitizer()
         
         # Session state
@@ -369,34 +486,74 @@ class QuizletLearningSession:
     
     def generate_question(self, vocab: VocabularyItem) -> Dict:
         """Generate a question for the given vocabulary item"""
-        question_type = self.learning_algorithm.select_question_type(vocab)
+        # Determine question direction
+        direction = self._select_question_direction()
+        
+        # Select question type based on direction and configuration
+        question_type = self.learning_algorithm.select_question_type(vocab, direction)
         
         question = {
             'vocabulary_id': vocab.id,
             'term': vocab.term,
             'definition': vocab.definition,
             'question_type': question_type,
+            'question_direction': direction,
             'probability_correct': vocab.probability_correct
         }
         
+        # Set the prompt and correct answer based on direction
+        if direction == QuestionDirection.TERM_TO_DEFINITION:
+            question['prompt'] = vocab.term
+            question['correct_answer'] = vocab.definition
+        elif direction == QuestionDirection.DEFINITION_TO_TERM:
+            question['prompt'] = vocab.definition
+            question['correct_answer'] = vocab.term
+        else:
+            # Mixed direction - randomly choose
+            if random.choice([True, False]):
+                question['prompt'] = vocab.term
+                question['correct_answer'] = vocab.definition
+                question['actual_direction'] = QuestionDirection.TERM_TO_DEFINITION
+            else:
+                question['prompt'] = vocab.definition
+                question['correct_answer'] = vocab.term
+                question['actual_direction'] = QuestionDirection.DEFINITION_TO_TERM
+        
         if question_type == QuestionType.MULTIPLE_CHOICE:
             # Generate distractors for multiple choice
-            question['options'] = self._generate_multiple_choice_options(vocab)
+            question['options'] = self._generate_multiple_choice_options(vocab, direction)
         
         return question
     
-    def _generate_multiple_choice_options(self, vocab: VocabularyItem) -> List[str]:
-        """Generate multiple choice options with distractors"""
-        options = [vocab.definition]
+    def _select_question_direction(self) -> QuestionDirection:
+        """Select question direction based on configuration"""
+        if self.config.question_direction == QuestionDirection.MIXED:
+            # Randomly choose direction for mixed mode
+            return random.choice([QuestionDirection.TERM_TO_DEFINITION, QuestionDirection.DEFINITION_TO_TERM])
+        else:
+            return self.config.question_direction
+    
+    def _generate_multiple_choice_options(self, vocab: VocabularyItem, direction: QuestionDirection) -> List[str]:
+        """Generate multiple choice options with distractors based on direction"""
+        if direction == QuestionDirection.TERM_TO_DEFINITION:
+            correct_answer = vocab.definition
+            # Get other definitions as distractors
+            other_options = [
+                v.definition for v in self.vocabulary.values()
+                if v.id != vocab.id and v.definition != vocab.definition
+            ]
+        else:  # DEFINITION_TO_TERM
+            correct_answer = vocab.term
+            # Get other terms as distractors
+            other_options = [
+                v.term for v in self.vocabulary.values()
+                if v.id != vocab.id and v.term != vocab.term
+            ]
         
-        # Get other definitions as distractors
-        other_definitions = [
-            v.definition for v in self.vocabulary.values()
-            if v.id != vocab.id and v.definition != vocab.definition
-        ]
+        options = [correct_answer]
         
         # Add 3 random distractors
-        distractors = random.sample(other_definitions, min(3, len(other_definitions)))
+        distractors = random.sample(other_options, min(3, len(other_options)))
         options.extend(distractors)
         
         # Shuffle options
@@ -404,26 +561,44 @@ class QuizletLearningSession:
         
         return options
     
-    def submit_answer(self, vocabulary_id: int, user_input: str, question_type: QuestionType) -> Dict:
+    def submit_answer(self, vocabulary_id: int, user_input: str, question_type: QuestionType, 
+                      question_direction: QuestionDirection, correct_answer: str) -> Dict:
         """
         Submit an answer and get feedback
-        Returns result with correctness and feedback
+        Returns result with correctness and partial credit
         """
         vocab = self.vocabulary[vocabulary_id]
         
+        # Initialize scores
+        is_correct = False
+        partial_score = 0.0
+        
         # Determine correctness based on question type
         if question_type == QuestionType.MULTIPLE_CHOICE:
-            is_correct = user_input.strip() == vocab.definition
+            is_correct = user_input.strip() == correct_answer
+            partial_score = 1.0 if is_correct else 0.0
         else:
             # For written answers, use text sanitization and spell checking
-            is_correct = self.text_sanitizer.is_spelling_match(user_input, vocab.definition)
+            if self.config.partial_credit_enabled:
+                # Calculate similarity score for partial credit
+                partial_score = self.text_sanitizer.calculate_similarity_score(user_input, correct_answer)
+                is_correct = partial_score >= self.config.partial_credit_threshold
+            else:
+                # Binary scoring
+                is_correct = self.text_sanitizer.is_spelling_match(
+                    user_input, correct_answer, 
+                    tolerance=self.config.spelling_tolerance / max(len(correct_answer), 1)
+                )
+                partial_score = 1.0 if is_correct else 0.0
         
         # Create answer record
         answer = Answer(
             vocabulary_id=vocabulary_id,
             user_input=user_input,
             is_correct=is_correct,
-            question_type=question_type
+            question_type=question_type,
+            question_direction=question_direction,
+            partial_score=partial_score
         )
         
         # Update vocabulary statistics
@@ -432,10 +607,10 @@ class QuizletLearningSession:
         
         # Update learning algorithm
         self.learning_algorithm.update_probability(vocab, is_correct, question_type)
-        self.learning_algorithm.update_mastery_level(vocab, is_correct)
+        self.learning_algorithm.update_mastery_level(vocab, is_correct, partial_score)
         
-        # Track failed items for retry
-        if not is_correct:
+        # Track failed items for retry (considering partial credit)
+        if not is_correct or (self.config.partial_credit_enabled and partial_score < self.config.partial_credit_threshold):
             self.failed_items.add(vocabulary_id)
         
         # Store answer
@@ -444,13 +619,15 @@ class QuizletLearningSession:
         
         result = {
             'is_correct': is_correct,
-            'correct_answer': vocab.definition,
+            'partial_score': partial_score,
+            'correct_answer': correct_answer,
             'user_answer': user_input,
             'sanitized_user_answer': self.text_sanitizer.sanitize_answer(user_input),
-            'sanitized_correct_answer': self.text_sanitizer.sanitize_answer(vocab.definition),
+            'sanitized_correct_answer': self.text_sanitizer.sanitize_answer(correct_answer),
             'mastery_level': vocab.mastery_level.value,
             'correct_streak': vocab.correct_streak,
-            'probability_correct': vocab.probability_correct
+            'probability_correct': vocab.probability_correct,
+            'question_direction': question_direction.value
         }
         
         return result
@@ -546,60 +723,95 @@ def main():
     print("🎓 Quizlet Learning Algorithm Reimplementation")
     print("=" * 50)
     
-    # Create sample vocabulary
-    vocabulary = create_sample_vocabulary()
+    # Demo different configurations
+    configs = [
+        ("Standard Configuration", LearningConfiguration()),
+        ("German-English Mixed", LearningConfiguration(
+            question_direction=QuestionDirection.MIXED,
+            partial_credit_enabled=True
+        )),
+        ("Multiple Choice Only", LearningConfiguration(
+            enabled_question_types={QuestionType.MULTIPLE_CHOICE}
+        )),
+        ("Written Only with Partial Credit", LearningConfiguration(
+            enabled_question_types={QuestionType.WRITTEN},
+            partial_credit_enabled=True,
+            partial_credit_threshold=0.6
+        ))
+    ]
     
-    # Initialize learning session
-    session = QuizletLearningSession(vocabulary, round_size=5)
-    
-    print(f"\n📚 Loaded {len(vocabulary)} vocabulary items")
-    
-    # Simulate a learning session
-    round_num = 1
-    max_rounds = 10
-    
-    while session.should_continue_session() and round_num <= max_rounds:
-        print(f"\n🔄 Round {round_num}")
-        print("-" * 30)
+    for config_name, config in configs:
+        print(f"\n🔧 {config_name}")
+        print("=" * 50)
         
-        # Start new round
+        # Create sample vocabulary for German-English
+        vocabulary = [
+            VocabularyItem(1, "hello", "hallo"),
+            VocabularyItem(2, "goodbye", "auf wiedersehen"),
+            VocabularyItem(3, "thank you", "danke"),
+            VocabularyItem(4, "please", "bitte"),
+            VocabularyItem(5, "house", "haus")
+        ]
+        
+        # Initialize learning session with configuration
+        session = QuizletLearningSession(vocabulary, round_size=3, config=config)
+        
+        print(f"\n📚 Loaded {len(vocabulary)} vocabulary items")
+        print(f"Question direction: {config.question_direction.value}")
+        print(f"Enabled question types: {[qt.name for qt in config.enabled_question_types]}")
+        print(f"Partial credit: {'Enabled' if config.partial_credit_enabled else 'Disabled'}")
+        
+        # Simulate one round
         round_items = session.start_new_round()
-        print(f"Learning {len(round_items)} items this round")
+        print(f"\n🔄 Learning {len(round_items)} items")
+        print("-" * 30)
         
         # Process each item in the round
         for vocab in round_items:
             question = session.generate_question(vocab)
             
-            print(f"\n📝 Question: {vocab.term}")
+            print(f"\n📝 Prompt: {question['prompt']}")
             print(f"Question type: {question['question_type'].name}")
+            print(f"Direction: {question['question_direction'].value}")
             
             if question['question_type'] == QuestionType.MULTIPLE_CHOICE:
                 print("Options:")
                 for i, option in enumerate(question['options'], 1):
                     print(f"  {i}. {option}")
                 
-                # Simulate user selection (random for demo)
-                selected_option = random.choice(question['options'])
-                print(f"Selected: {selected_option}")
-                user_answer = selected_option
-            else:
-                # Simulate written answer (with some spelling errors for demo)
-                correct_answer = vocab.definition
-                if random.random() < 0.7:  # 70% chance of correct answer
-                    user_answer = correct_answer
+                # Simulate user selection (choose correct answer 80% of the time)
+                if random.random() < 0.8:
+                    user_answer = question['correct_answer']
                 else:
-                    # Simulate spelling error or wrong answer
-                    if random.random() < 0.5:
-                        # Spelling error
-                        user_answer = correct_answer.replace('a', 'e', 1)  # Simple error
+                    user_answer = random.choice([opt for opt in question['options'] if opt != question['correct_answer']])
+                print(f"Selected: {user_answer}")
+            else:
+                # Simulate written answer with various accuracy levels
+                correct_answer = question['correct_answer']
+                accuracy_roll = random.random()
+                
+                if accuracy_roll < 0.6:  # 60% perfect answer
+                    user_answer = correct_answer
+                elif accuracy_roll < 0.8:  # 20% spelling error
+                    # Introduce a small spelling error
+                    if len(correct_answer) > 3:
+                        pos = random.randint(1, len(correct_answer) - 2)
+                        user_answer = correct_answer[:pos] + correct_answer[pos+1:]  # Remove one character
                     else:
-                        # Wrong answer
-                        user_answer = "wrong answer"
+                        user_answer = correct_answer + "x"  # Add extra character
+                else:  # 20% wrong answer
+                    user_answer = "completely wrong"
                 
                 print(f"Answer: {user_answer}")
             
-            # Submit answer
-            result = session.submit_answer(vocab.id, user_answer, question['question_type'])
+            # Submit answer with new signature
+            result = session.submit_answer(
+                vocab.id, 
+                user_answer, 
+                question['question_type'],
+                question['question_direction'],
+                question['correct_answer']
+            )
             
             # Show feedback
             if result['is_correct']:
@@ -608,28 +820,20 @@ def main():
                 print("❌ Incorrect")
                 print(f"Correct answer: {result['correct_answer']}")
             
+            if config.partial_credit_enabled:
+                print(f"Partial score: {result['partial_score']:.2f}")
+            
             print(f"Mastery: {result['mastery_level']} (streak: {result['correct_streak']})")
         
         # Round summary
         summary = session.get_round_summary()
-        print(f"\n📊 Round {round_num} Summary:")
+        print(f"\n📊 Summary:")
         print(f"Correct: {summary['correct']}/{summary['total']} ({summary['percentage']:.1f}%)")
         
         if summary['failed_items']:
-            print(f"Failed items will be retried: {summary['failed_items']}")
+            print(f"Failed items for retry: {summary['failed_items']}")
         
-        round_num += 1
-    
-    # Final progress
-    progress = session.get_overall_progress()
-    print(f"\n🎯 Final Progress:")
-    print(f"Total items: {progress['total_items']}")
-    print(f"Mastered: {progress['mastered']} ({progress['mastered_percentage']:.1f}%)")
-    print(f"In progress: {progress['in_progress']}")
-    print(f"Not started: {progress['not_started']}")
-    print(f"Total answers given: {progress['total_answers']}")
-    
-    print("\n✨ Learning session complete!")
+        print("\n" + "=" * 50)
 
 
 if __name__ == "__main__":

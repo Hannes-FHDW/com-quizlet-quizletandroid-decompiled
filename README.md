@@ -111,12 +111,114 @@ for vocab in round_items:
     question = session.generate_question(vocab)
     user_answer = input(f"What does '{vocab.term}' mean? ")
     
-    result = session.submit_answer(vocab.id, user_answer, question['question_type'])
+    result = session.submit_answer(
+        vocab.id, 
+        user_answer, 
+        question['question_type'],
+        question['question_direction'],
+        question['correct_answer']
+    )
     
     if result['is_correct']:
         print("✅ Correct!")
     else:
         print(f"❌ Incorrect. Answer: {result['correct_answer']}")
+```
+
+### Advanced Configuration Features
+
+The learning system supports extensive configuration options for different learning scenarios:
+
+#### Question Direction Control
+```python
+from quizlet_learning_algorithm import LearningConfiguration, QuestionDirection
+
+# Ask for English given German
+config = LearningConfiguration(
+    question_direction=QuestionDirection.DEFINITION_TO_TERM
+)
+
+# Mixed: randomly ask for either direction  
+config = LearningConfiguration(
+    question_direction=QuestionDirection.MIXED
+)
+
+# Traditional: ask for definition given term (default)
+config = LearningConfiguration(
+    question_direction=QuestionDirection.TERM_TO_DEFINITION
+)
+```
+
+#### Question Type Filtering
+```python
+# Only multiple choice questions
+config = LearningConfiguration(
+    enabled_question_types={QuestionType.MULTIPLE_CHOICE}
+)
+
+# Only written questions (hardest mode)
+config = LearningConfiguration(
+    enabled_question_types={QuestionType.WRITTEN}
+)
+
+# Disable written questions entirely
+config = LearningConfiguration(
+    enabled_question_types={
+        QuestionType.MULTIPLE_CHOICE,
+        QuestionType.TRUE_FALSE,
+        QuestionType.FILL_IN_BLANK
+    }
+)
+```
+
+#### Language-Specific Written Questions
+```python
+# Disable written questions when asking for English
+config = LearningConfiguration(
+    term_language_written_enabled=False,    # No written for English
+    definition_language_written_enabled=True  # Allow written for German
+)
+
+# Disable written questions when asking for German  
+config = LearningConfiguration(
+    term_language_written_enabled=True,     # Allow written for English
+    definition_language_written_enabled=False  # No written for German
+)
+```
+
+#### Partial Credit System
+```python
+# Enable partial credit with 70% threshold
+config = LearningConfiguration(
+    partial_credit_enabled=True,
+    partial_credit_threshold=0.7,  # Need 70% similarity to be "correct"
+    spelling_tolerance=2  # Allow up to 2 character differences
+)
+
+# Example: "helo" vs "hello" gets 80% similarity score
+result = session.submit_answer(vocab.id, "helo", ...)
+print(f"Similarity: {result['partial_score']}")  # 0.8
+print(f"Correct: {result['is_correct']}")        # True (>= 0.7 threshold)
+```
+
+#### Complete Configuration Example
+```python
+# German-English learning with flexible settings
+config = LearningConfiguration(
+    question_direction=QuestionDirection.MIXED,
+    enabled_question_types={
+        QuestionType.MULTIPLE_CHOICE,
+        QuestionType.WRITTEN,
+        QuestionType.FILL_IN_BLANK
+    },
+    term_language_written_enabled=True,     # Allow written for English
+    definition_language_written_enabled=False,  # No written for German
+    partial_credit_enabled=True,
+    partial_credit_threshold=0.6,
+    spelling_tolerance=2
+)
+
+session = QuizletLearningSession(vocabulary, config=config)
 ```
 
 ### Running the Demo
