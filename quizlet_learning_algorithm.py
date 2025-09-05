@@ -18,6 +18,7 @@ import re
 import random
 import math
 import json
+import requests
 from typing import Dict, List, Tuple, Optional, Set
 from enum import Enum
 from dataclasses import dataclass, field
@@ -155,6 +156,26 @@ class TextSanitizer:
         return re.sub(r'[^\w\s]', '', text)
     
     @classmethod
+    def split_multiple_answers(cls, text: str) -> List[str]:
+        """
+        Split text containing multiple possible answers separated by /, ,, or ;
+        Returns list of individual answers, each sanitized
+        """
+        if not text:
+            return []
+        
+        # Split on multiple separators and clean each part
+        parts = re.split(r'[/,;]', text)
+        answers = []
+        
+        for part in parts:
+            sanitized = cls.sanitize_answer(part)
+            if sanitized:  # Only add non-empty answers
+                answers.append(sanitized)
+        
+        return answers if answers else [cls.sanitize_answer(text)]
+    
+    @classmethod
     def sanitize_answer(cls, text: str) -> str:
         """
         Full sanitization pipeline:
@@ -207,45 +228,60 @@ class TextSanitizer:
         """
         Check if answer is close enough considering spelling errors
         Based on grading/impls/levenshteinplus logic
+        Supports multiple correct answers separated by /, ,, or ;
         """
         user_clean = cls.sanitize_answer(user_answer)
-        correct_clean = cls.sanitize_answer(correct_answer)
+        possible_answers = cls.split_multiple_answers(correct_answer)
         
-        if user_clean == correct_clean:
-            return True
-        
-        # Calculate allowed errors based on length
-        max_length = max(len(user_clean), len(correct_clean))
-        if max_length == 0:
-            return False
+        # Check against each possible answer
+        for correct_clean in possible_answers:
+            if user_clean == correct_clean:
+                return True
             
-        max_errors = int(max_length * tolerance)
-        distance = cls.levenshtein_distance(user_clean, correct_clean)
+            # Calculate allowed errors based on length
+            max_length = max(len(user_clean), len(correct_clean))
+            if max_length == 0:
+                continue
+                
+            max_errors = int(max_length * tolerance)
+            distance = cls.levenshtein_distance(user_clean, correct_clean)
+            
+            if distance <= max_errors:
+                return True
         
-        return distance <= max_errors
+        return False
     
     @classmethod
     def calculate_similarity_score(cls, user_answer: str, correct_answer: str) -> float:
         """
         Calculate similarity score between 0.0 and 1.0 for partial credit
         Returns 1.0 for exact match, decreasing based on edit distance
+        Supports multiple correct answers - returns highest similarity score
         """
         user_clean = cls.sanitize_answer(user_answer)
-        correct_clean = cls.sanitize_answer(correct_answer)
+        possible_answers = cls.split_multiple_answers(correct_answer)
         
-        if user_clean == correct_clean:
-            return 1.0
-        
-        if not user_clean or not correct_clean:
+        if not user_clean:
             return 0.0
         
-        max_length = max(len(user_clean), len(correct_clean))
-        distance = cls.levenshtein_distance(user_clean, correct_clean)
+        max_similarity = 0.0
         
-        # Calculate similarity as 1 - (distance / max_possible_distance)
-        similarity = max(0.0, 1.0 - (distance / max_length))
+        # Check against each possible answer and return the best score
+        for correct_clean in possible_answers:
+            if user_clean == correct_clean:
+                return 1.0
+            
+            if not correct_clean:
+                continue
+            
+            max_length = max(len(user_clean), len(correct_clean))
+            distance = cls.levenshtein_distance(user_clean, correct_clean)
+            
+            # Calculate similarity as 1 - (distance / max_possible_distance)
+            similarity = max(0.0, 1.0 - (distance / max_length))
+            max_similarity = max(max_similarity, similarity)
         
-        return similarity
+        return max_similarity
 
 
 class LearningAlgorithm:
@@ -683,28 +719,29 @@ class QuizletLearningSession:
 
 
 def create_sample_vocabulary() -> List[VocabularyItem]:
-    """Create sample vocabulary for testing"""
+    """Create sample vocabulary for testing - includes multiple answer examples"""
     sample_vocab = [
-        ("hello", "a greeting"),
-        ("goodbye", "a farewell"),
-        ("thank you", "an expression of gratitude"),
-        ("please", "a polite request word"),
-        ("sorry", "an apology"),
-        ("house", "a building where people live"),
-        ("car", "a motor vehicle"),
-        ("book", "written or printed work"),
-        ("water", "clear liquid essential for life"),
-        ("food", "substances consumed for nutrition"),
-        ("happy", "feeling joy or pleasure"),
-        ("sad", "feeling sorrow or unhappiness"),
-        ("big", "large in size"),
-        ("small", "little in size"),
-        ("red", "color of blood"),
-        ("blue", "color of sky"),
-        ("green", "color of grass"),
-        ("black", "darkest color"),
-        ("white", "lightest color"),
-        ("yellow", "color of sun")
+        ("hello", "greeting/salutation/hi"),
+        ("goodbye", "farewell/bye"),
+        ("thank you", "thanks/gratitude"),
+        ("please", "polite request/kindly"),
+        ("sorry", "apology/excuse me"),
+        ("house", "home/building/residence"),
+        ("color", "color/colour"),  # American/British spelling
+        ("car", "automobile/vehicle"),
+        ("book", "written work/publication"),
+        ("water", "clear liquid/H2O"),
+        ("food", "nutrition/meal/sustenance"),
+        ("happy", "joyful/glad/cheerful"),
+        ("sad", "unhappy/sorrowful"),
+        ("big", "large/huge"),
+        ("small", "little/tiny"),
+        ("red", "crimson/scarlet"),
+        ("blue", "azure/navy"),
+        ("green", "emerald/lime"),
+        ("black", "dark/ebony"),
+        ("white", "bright/snow"),
+        ("yellow", "golden/amber")
     ]
     
     vocabulary_list = []
@@ -716,6 +753,125 @@ def create_sample_vocabulary() -> List[VocabularyItem]:
         ))
     
     return vocabulary_list
+
+
+class QuizletAPI:
+    """
+    API client for fetching vocabulary sets from Quizlet
+    """
+    
+    BASE_URL = "https://api.quizlet.com/3.11/terms"
+    CLIENT_ID = "XbSGGchEnA"
+    
+    @classmethod
+    def extract_set_id(cls, url: str) -> str:
+        """
+        Extract set ID from Quizlet URL
+        Example: https://quizlet.com/de/karteikarten/hi-403022052 -> 403022052
+        Example: https://quizlet.com/403022052/test -> 403022052
+        """
+        # Try different patterns for Quizlet URLs
+        patterns = [
+            r'/(\d+)(?:/[^/]*)?/?$',  # Matches /123456 or /123456/something at end
+            r'-(\d+)$',               # Matches -123456 at end
+            r'/(\d+)-',               # Matches /123456- in middle
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, url)
+            if match:
+                return match.group(1)
+        
+        raise ValueError(f"Could not extract set ID from URL: {url}")
+    
+    @classmethod
+    def fetch_vocabulary_set(cls, set_id: str) -> List[VocabularyItem]:
+        """
+        Fetch vocabulary from Quizlet API and convert to VocabularyItem objects
+        
+        Args:
+            set_id: The Quizlet set ID
+            
+        Returns:
+            List of VocabularyItem objects
+            
+        Raises:
+            requests.RequestException: If API request fails
+            ValueError: If response format is invalid
+        """
+        url = f"{cls.BASE_URL}?include[term][]=set&include[term][]=definitionImage&filters[setId]={set_id}&perPage=200&client_id={cls.CLIENT_ID}"
+        
+        try:
+            response = requests.get(url, timeout=30)
+            response.raise_for_status()
+            data = response.json()
+            
+            # Extract terms from the response
+            if 'responses' not in data or not data['responses']:
+                raise ValueError("Invalid response format: missing 'responses'")
+            
+            response_data = data['responses'][0]
+            if 'models' not in response_data or 'term' not in response_data['models']:
+                raise ValueError("Invalid response format: missing 'models.term'")
+            
+            terms = response_data['models']['term']
+            vocabulary_list = []
+            
+            for i, term_data in enumerate(terms):
+                # Extract word and definition
+                word = term_data.get('word', '').strip()
+                definition = term_data.get('definition', '').strip()
+                term_id = term_data.get('id', i)
+                
+                if word and definition:
+                    vocabulary_list.append(VocabularyItem(
+                        id=term_id,
+                        term=word,
+                        definition=definition
+                    ))
+            
+            return vocabulary_list
+            
+        except requests.RequestException as e:
+            raise requests.RequestException(f"Failed to fetch vocabulary set {set_id}: {e}")
+        except (KeyError, ValueError) as e:
+            raise ValueError(f"Failed to parse vocabulary set {set_id}: {e}")
+    
+    @classmethod
+    def fetch_from_url(cls, quizlet_url: str) -> List[VocabularyItem]:
+        """
+        Convenience method to fetch vocabulary directly from a Quizlet URL
+        
+        Args:
+            quizlet_url: Full Quizlet URL (e.g., https://quizlet.com/de/karteikarten/hi-403022052)
+            
+        Returns:
+            List of VocabularyItem objects
+        """
+        set_id = cls.extract_set_id(quizlet_url)
+        return cls.fetch_vocabulary_set(set_id)
+
+
+def load_vocabulary_from_quizlet() -> List[VocabularyItem]:
+    """
+    Interactive function to load vocabulary from Quizlet
+    Prompts user for URL and fetches the vocabulary set
+    """
+    try:
+        url = input("Enter Quizlet URL: ").strip()
+        if not url:
+            print("No URL provided, using demo vocabulary")
+            return create_sample_vocabulary()
+        
+        print(f"Fetching vocabulary from: {url}")
+        vocabulary = QuizletAPI.fetch_from_url(url)
+        print(f"Successfully loaded {len(vocabulary)} vocabulary items")
+        return vocabulary
+        
+    except Exception as e:
+        print(f"Error loading from Quizlet: {e}")
+        print("Using demo vocabulary instead")
+        return create_sample_vocabulary()
 
 
 def main():
@@ -744,13 +900,13 @@ def main():
         print(f"\n🔧 {config_name}")
         print("=" * 50)
         
-        # Create sample vocabulary for German-English
+        # Create sample vocabulary with multiple answer examples
         vocabulary = [
-            VocabularyItem(1, "hello", "hallo"),
-            VocabularyItem(2, "goodbye", "auf wiedersehen"),
-            VocabularyItem(3, "thank you", "danke"),
-            VocabularyItem(4, "please", "bitte"),
-            VocabularyItem(5, "house", "haus")
+            VocabularyItem(1, "hello", "hallo/guten tag"),
+            VocabularyItem(2, "goodbye", "auf wiedersehen/tschüss"),
+            VocabularyItem(3, "thank you", "danke/vielen dank"),
+            VocabularyItem(4, "please", "bitte/bitteschön"),
+            VocabularyItem(5, "house", "haus/gebäude")
         ]
         
         # Initialize learning session with configuration

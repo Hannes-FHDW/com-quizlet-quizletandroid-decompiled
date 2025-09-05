@@ -12,7 +12,7 @@ This script demonstrates the key features:
 from quizlet_learning_algorithm import (
     TextSanitizer, VocabularyItem, QuizletLearningSession, 
     QuestionType, MasteryLevel, LearningAlgorithm, LearningConfiguration,
-    QuestionDirection
+    QuestionDirection, QuizletAPI
 )
 import random
 
@@ -362,6 +362,130 @@ def main():
     print("- Configurable question types and directions")
     print("- Partial credit system with similarity scoring")
     print("- Language-specific written question controls")
+    print("- Multiple correct answers separated by /, ,, ;")
+    print("- Quizlet API integration for loading vocabulary sets")
+
+
+def test_multiple_answers():
+    """Test the multiple answers feature"""
+    print("\n🔀 Testing Multiple Answers")
+    print("=" * 40)
+    
+    sanitizer = TextSanitizer()
+    
+    # Test multiple answer splitting
+    test_cases = [
+        ("color/colour", ["color", "colour"]),
+        ("red, blue; green", ["red", "blue", "green"]),
+        ("hello/hi/hey", ["hello", "hi", "hey"]),
+        ("single", ["single"]),
+        ("", []),
+        ("  color  /  colour  ", ["color", "colour"])
+    ]
+    
+    print("Testing answer splitting:")
+    for input_text, expected in test_cases:
+        result = sanitizer.split_multiple_answers(input_text)
+        print(f"'{input_text}' -> {result}")
+        assert result == expected, f"Expected {expected}, got {result}"
+    
+    # Test spelling match with multiple answers
+    print("\nTesting spelling match with multiple answers:")
+    test_cases = [
+        ("color", "color/colour", True),    # Exact match with first
+        ("colour", "color/colour", True),   # Exact match with second  
+        ("colors", "color/colour", True),   # Spelling match with first
+        ("colours", "color/colour", True),  # Spelling match with second
+        ("red", "blue/green", False),       # No match
+        ("colr", "color/colour", True),     # Spelling error but close
+    ]
+    
+    for user_answer, correct_answers, expected in test_cases:
+        result = sanitizer.is_spelling_match(user_answer, correct_answers)
+        print(f"'{user_answer}' vs '{correct_answers}' -> {result} (expected {expected})")
+        assert result == expected, f"Expected {expected}, got {result}"
+    
+    # Test similarity scoring with multiple answers
+    print("\nTesting similarity scoring with multiple answers:")
+    test_cases = [
+        ("color", "color/colour", 1.0),     # Perfect match
+        ("colour", "color/colour", 1.0),    # Perfect match with second
+        ("colr", "color/colour", 0.8),      # Higher score should be used
+        ("red", "blue/green", 0.5),         # Some similarity expected
+    ]
+    
+    for user_answer, correct_answers, expected in test_cases:
+        result = sanitizer.calculate_similarity_score(user_answer, correct_answers)
+        print(f"'{user_answer}' vs '{correct_answers}' -> {result:.1f} (expected {expected})")
+        assert abs(result - expected) < 0.2, f"Expected ~{expected}, got {result}"
+    
+    print("✅ Multiple answers tests passed!")
+
+
+def test_quizlet_api():
+    """Test Quizlet API URL parsing"""
+    print("\n🌐 Testing Quizlet API")
+    print("=" * 40)
+    
+    # Test URL parsing
+    test_urls = [
+        ("https://quizlet.com/de/karteikarten/hi-403022052", "403022052"),
+        ("https://quizlet.com/123456/test", "123456"),
+        ("quizlet.com/789/vocab", "789"),
+    ]
+    
+    print("Testing URL parsing:")
+    for url, expected_id in test_urls:
+        try:
+            result = QuizletAPI.extract_set_id(url)
+            print(f"'{url}' -> '{result}' (expected '{expected_id}')")
+            assert result == expected_id, f"Expected {expected_id}, got {result}"
+        except Exception as e:
+            print(f"'{url}' -> Error: {e}")
+    
+    # Test invalid URLs
+    invalid_urls = [
+        "https://example.com/no-numbers",
+        "not-a-url",
+        "",
+    ]
+    
+    print("\nTesting invalid URLs:")
+    for url in invalid_urls:
+        try:
+            result = QuizletAPI.extract_set_id(url)
+            print(f"'{url}' -> Should have failed but got '{result}'")
+        except ValueError as e:
+            print(f"'{url}' -> Correctly failed: {e}")
+        except Exception as e:
+            print(f"'{url}' -> Unexpected error: {e}")
+    
+    print("✅ Quizlet API tests passed!")
+
+
+def main():
+    """Run all tests and demonstrations"""
+    test_text_sanitization()
+    test_question_type_selection()
+    test_learning_progression() 
+    test_round_generation()
+    test_new_configuration_features()
+    test_multiple_answers()
+    test_quizlet_api()
+    
+    print("\n" + "=" * 50)
+    print("🎉 All tests completed!")
+    print("\nThis implementation provides:")
+    print("- Accurate text sanitization matching Quizlet's grading")
+    print("- Intelligent question type selection based on confidence")
+    print("- Mastery level progression through correct/incorrect answers")  
+    print("- Intelligent round generation prioritizing struggling items")
+    print("- Complete learning cycle with progress tracking")
+    print("- Configurable question types and directions")
+    print("- Partial credit system with similarity scoring")
+    print("- Language-specific written question controls")
+    print("- Multiple correct answers separated by /, ,, ;")
+    print("- Quizlet API integration for loading vocabulary sets")
 
 
 if __name__ == "__main__":

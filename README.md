@@ -284,3 +284,60 @@ The algorithm successfully captures Quizlet's core learning mechanics:
 - **Progress Tracking**: Clear progression through mastery levels
 
 This implementation provides a functional reproduction of Quizlet's learning system that can be used for educational applications or further research into adaptive learning algorithms.
+
+## New Features (Latest Update)
+
+### Multiple Correct Answers
+The system now supports vocabulary items with multiple possible correct answers separated by `/`, `,`, or `;`:
+
+```python
+# Example vocabulary with multiple answers
+vocabulary = [
+    VocabularyItem(1, "color", "color/colour"),  # American/British spelling
+    VocabularyItem(2, "hello", "hi/hey/greeting"),  # Multiple synonyms
+    VocabularyItem(3, "car", "automobile/vehicle")  # Alternative terms
+]
+
+# All of these answers would be accepted as correct:
+# User types "color" or "colour" -> both correct
+# User types "hi", "hey", or "greeting" -> all correct
+```
+
+### Quizlet API Integration
+Load vocabulary sets directly from Quizlet using their public API:
+
+```python
+from quizlet_learning_algorithm import QuizletAPI
+
+# Load from Quizlet URL
+url = "https://quizlet.com/de/karteikarten/hi-403022052"
+vocabulary = QuizletAPI.fetch_from_url(url)
+
+# Or extract set ID and fetch directly
+set_id = QuizletAPI.extract_set_id(url)
+vocabulary = QuizletAPI.fetch_vocabulary_set(set_id)
+
+# Use with learning session
+session = QuizletLearningSession(vocabulary, config=config)
+```
+
+### Enhanced Answer Validation
+The answer validation system now:
+- Checks user input against all possible correct answers
+- Returns the highest similarity score among all possible answers
+- Supports partial credit for any valid answer variation
+- Maintains backward compatibility with single-answer vocabulary
+
+### Usage Example
+```python
+# Interactive vocabulary loading with Quizlet integration
+vocabulary = load_vocabulary_from_quizlet()  # Prompts for Quizlet URL
+
+# Create session with multiple answer support
+session = QuizletLearningSession(vocabulary, config=LearningConfiguration(
+    partial_credit_enabled=True,
+    partial_credit_threshold=0.7
+))
+
+# The system automatically handles multiple answers in validation
+```
